@@ -38,6 +38,17 @@ Run it once, and again whenever you download new custom maps. Then reload the ma
 
 Requires `unzip`, `dd`, `od` (standard on any distro). **No root needed.**
 
+### Auto mode (`--watch`)
+
+Instead of running it by hand after each download, `--watch` does a one-shot pass and then **watches the download folder** and auto-fixes each new map the instant it finishes downloading:
+
+```bash
+sudo apt install inotify-tools     # one-time (provides inotifywait)
+./fix-hl2dm-textures.sh --watch
+```
+
+Leave it running while you play; reload a map (`retry`) after it reports fixing one. It uses `inotify` (the Linux equivalent of Windows' `FileSystemWatcher`) and only ever copies files — it never touches the running game.
+
 ## Still purple after running it?
 
 Then that map references content that **isn't packed in the BSP and isn't in the game** — genuinely missing assets (it'd be purple on Windows too). Nothing to extract; the file simply doesn't exist on your machine.

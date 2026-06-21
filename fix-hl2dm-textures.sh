@@ -19,18 +19,30 @@
 # VPKs and mmap through FUSE segfaults the engine.
 #
 # USAGE:
-#   ./fix-hl2dm-textures.sh                 # auto-detect the install
-#   ./fix-hl2dm-textures.sh "/path/to/steamapps/common/Half-Life 2 Deathmatch"
-# Run again after downloading new maps, then reload in-game (console ~ -> retry).
+#   ./fix-hl2dm-textures.sh                 # one-shot: fix everything installed now
+#   ./fix-hl2dm-textures.sh --watch         # one-shot, then auto-fix new map downloads
+#   ./fix-hl2dm-textures.sh [--watch] "/path/to/steamapps/common/Half-Life 2 Deathmatch"
+# After it fixes a map, reload it in-game: open the console (~) and type  retry
 #
-# Requires: unzip, dd, od (coreutils). No root needed.
+# Requires: unzip, dd, od (coreutils). --watch also needs inotifywait (inotify-tools).
+# No root needed.
 
 set -u
 GAME_NAME="Half-Life 2 Deathmatch"
 MOD="hl2mp"
 
+# ---------- args ----------
+WATCH=0
+GAME=""
+for a in "$@"; do
+  case "$a" in
+    --watch) WATCH=1 ;;
+    -h|--help) echo "usage: $0 [--watch] [/path/to/$GAME_NAME]"; exit 0 ;;
+    *) GAME="$a" ;;
+  esac
+done
+
 # ---------- locate the game install ----------
-GAME="${1:-}"
 if [ -z "$GAME" ]; then
   for root in \
       "$HOME/.steam/steam" "$HOME/.steam/root" "$HOME/.steam/debian-installation" \
@@ -57,30 +69,15 @@ if [ -z "$GAME" ] || [ ! -d "$GAME" ]; then
   exit 1
 fi
 VPKBIN="$GAME/bin/vpk"
+DLMAPS="$GAME/$MOD/download/maps"
 echo "Game: $GAME"
 vpk() { LD_LIBRARY_PATH="$GAME/bin" "$VPKBIN" "$@"; }
 
-# ---------- 1. stock materials from the VPKs -> loose (skip if already done) ----------
-if [ -d "$GAME/hl2/materials/concrete" ]; then
-  echo "[1/3] stock materials already extracted - skipping."
-else
-  echo "[1/3] extracting stock materials from VPKs (one-time)..."
-  for pair in "hl2/hl2_misc_dir.vpk|hl2" "$MOD/${MOD}_pak_dir.vpk|$MOD"; do
-    vpkfile="${pair%%|*}"; dest="${pair##*|}"
-    [ -f "$GAME/$vpkfile" ] || continue
-    ( cd "$GAME/$dest" || exit
-      vmts=$(vpk l "$GAME/$vpkfile" 2>/dev/null | grep -iE '\.vmt$')
-      printf '%s\n' "$vmts" | sed 's#/[^/]*$##' | sort -u | while read -r d; do [ -n "$d" ] && mkdir -p "$d"; done
-      printf '%s\n' "$vmts" | xargs -d '\n' -r env LD_LIBRARY_PATH="$GAME/bin" "$VPKBIN" x "$GAME/$vpkfile" >/dev/null 2>&1 )
-  done
-fi
-
-# ---------- 2. packed content from each map's BSP pakfile -> loose ----------
-# Carve LUMP_PAKFILE (lump 40) out, then unzip THAT. Running unzip directly on a
-# .bsp only works when the pakfile sits at the file's end; on large maps it's
-# mid-file and unzip silently finds nothing. The lump entry is at byte 648 of the
-# header (8 + 40*16): int32 offset @648, int32 length @652 (little-endian).
-echo "[2/3] extracting packed content from maps..."
+# ---------- helpers ----------
+# Extract one BSP's packed content to loose. Carve LUMP_PAKFILE (lump 40) out
+# first (offset/len are little-endian int32 at header bytes 648/652), then unzip
+# THAT. Running unzip on the .bsp directly only works when the pakfile sits at
+# the file's end; on large maps it's mid-file and unzip silently finds nothing.
 extract_bsp_pak() {
   local bsp="$1" tmp ofs len
   ofs=$(od -An -tu4 -j648 -N4 "$bsp" 2>/dev/null | tr -d ' ')
@@ -93,22 +90,72 @@ extract_bsp_pak() {
   unzip -o -q "$tmp" -x "materials/maps/*" -d "$GAME/$MOD/" 2>/dev/null  # skip per-map cubemaps
   rm -f "$tmp"
 }
-n=0
-for bsp in "$GAME/$MOD/download/maps/"*.bsp "$GAME/$MOD/maps/"*.bsp; do
-  [ -f "$bsp" ] || continue
-  extract_bsp_pak "$bsp" && n=$((n+1))
-done
-echo "      processed $n map(s)."
 
-# ---------- 3. lowercase every extracted path ----------
-echo "[3/3] normalising extracted names to lowercase..."
-for base in "$MOD/materials" "$MOD/models"; do
-  root="$GAME/$base"; [ -d "$root" ] || continue
-  find "$root" -type f | while IFS= read -r f; do
-    rel="${f#"$root"/}"; lrel=$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')
-    [ "$rel" != "$lrel" ] && { mkdir -p "$root/$(dirname "$lrel")"; mv -f "$f" "$root/$lrel"; }
+# Lowercase every file path under the mod's materials/ and models/ (engine
+# lowercases its lookups; packed content is often UPPERCASE).
+lowercase_tree() {
+  local base root f rel lrel
+  for base in "$MOD/materials" "$MOD/models"; do
+    root="$GAME/$base"; [ -d "$root" ] || continue
+    find "$root" -type f | while IFS= read -r f; do
+      rel="${f#"$root"/}"; lrel=$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')
+      [ "$rel" != "$lrel" ] && { mkdir -p "$root/$(dirname "$lrel")"; mv -f "$f" "$root/$lrel"; }
+    done
+    find "$root" -type d -empty -delete 2>/dev/null
   done
-  find "$root" -type d -empty -delete 2>/dev/null
-done
+}
 
-echo "Done. Reload the map in-game (open console with ~ and type: retry)."
+# Extract stock materials from the VPKs (one-time; skipped once done).
+extract_stock() {
+  if [ -d "$GAME/hl2/materials/concrete" ]; then
+    echo "[stock] already extracted - skipping."; return
+  fi
+  echo "[stock] extracting materials from VPKs (one-time)..."
+  local pair vpkfile dest vmts
+  for pair in "hl2/hl2_misc_dir.vpk|hl2" "$MOD/${MOD}_pak_dir.vpk|$MOD"; do
+    vpkfile="${pair%%|*}"; dest="${pair##*|}"
+    [ -f "$GAME/$vpkfile" ] || continue
+    ( cd "$GAME/$dest" || exit
+      vmts=$(vpk l "$GAME/$vpkfile" 2>/dev/null | grep -iE '\.vmt$')
+      printf '%s\n' "$vmts" | sed 's#/[^/]*$##' | sort -u | while read -r d; do [ -n "$d" ] && mkdir -p "$d"; done
+      printf '%s\n' "$vmts" | xargs -d '\n' -r env LD_LIBRARY_PATH="$GAME/bin" "$VPKBIN" x "$GAME/$vpkfile" >/dev/null 2>&1 )
+  done
+}
+
+# One-shot pass over everything installed right now.
+oneshot() {
+  extract_stock
+  echo "[maps] extracting packed content from installed maps..."
+  local n=0 bsp
+  for bsp in "$DLMAPS/"*.bsp "$GAME/$MOD/maps/"*.bsp; do
+    [ -f "$bsp" ] || continue
+    extract_bsp_pak "$bsp" && n=$((n+1))
+  done
+  lowercase_tree
+  echo "[maps] processed $n map(s)."
+}
+
+# ---------- run ----------
+oneshot
+
+if [ "$WATCH" -eq 1 ]; then
+  if ! command -v inotifywait >/dev/null 2>&1; then
+    echo; echo "--watch needs inotifywait. Install it with:  sudo apt install inotify-tools"; exit 1
+  fi
+  mkdir -p "$DLMAPS"
+  echo; echo "==> Watching for new map downloads in: $DLMAPS"
+  echo "==> Leave this window open while you play. Close it (or Ctrl+C) to stop."
+  inotifywait -m -e close_write -e moved_to --format '%w%f' "$DLMAPS" 2>/dev/null |
+  while IFS= read -r path; do
+    case "$path" in
+      *.bsp)
+        echo "[$(basename "$path")] new map - fixing..."
+        extract_bsp_pak "$path"
+        lowercase_tree
+        echo "    done. Reload in-game: console (~) -> retry"
+        ;;
+    esac
+  done
+else
+  echo "Done. Reload the map in-game (console ~ -> retry)."
+fi
