@@ -24,8 +24,7 @@
 #   ./fix-hl2dm-textures.sh [--watch] "/path/to/steamapps/common/Half-Life 2 Deathmatch"
 # After it fixes a map, reload it in-game: open the console (~) and type  retry
 #
-# Requires: unzip, dd, od (coreutils). --watch also needs inotifywait (inotify-tools).
-# No root needed.
+# Requires: unzip, dd, od, find, stat (coreutils). No root needed.
 
 set -u
 GAME_NAME="Half-Life 2 Deathmatch"
@@ -136,26 +135,28 @@ oneshot() {
 }
 
 # ---------- run ----------
-oneshot
-
 if [ "$WATCH" -eq 1 ]; then
-  if ! command -v inotifywait >/dev/null 2>&1; then
-    echo; echo "--watch needs inotifywait. Install it with:  sudo apt install inotify-tools"; exit 1
-  fi
+  extract_stock
   mkdir -p "$DLMAPS"
-  echo; echo "==> Watching for new map downloads in: $DLMAPS"
-  echo "==> Leave this window open while you play. Close it (or Ctrl+C) to stop."
-  inotifywait -m -e close_write -e moved_to --format '%w%f' "$DLMAPS" 2>/dev/null |
-  while IFS= read -r path; do
-    case "$path" in
-      *.bsp)
-        echo "[$(basename "$path")] new map - fixing..."
-        extract_bsp_pak "$path"
-        lowercase_tree
-        echo "    done. Reload in-game: console (~) -> retry"
-        ;;
-    esac
+  echo
+  echo "==> Watching for map downloads in: $DLMAPS  (re-scans every few seconds)"
+  echo "==> Leave this window open while you play. Ctrl+C to stop."
+  declare -A processed
+  while true; do
+    new=0
+    for bsp in "$DLMAPS"/*.bsp "$GAME/$MOD/maps/"*.bsp; do
+      [ -f "$bsp" ] || continue
+      # skip a file that's still downloading (modified within the last ~3s)
+      [ -n "$(find "$bsp" -newermt '3 seconds ago' 2>/dev/null)" ] && continue
+      key="$bsp|$(stat -c %Y "$bsp" 2>/dev/null)"   # path + mtime, so re-downloads re-process
+      [ -n "${processed[$key]:-}" ] && continue
+      processed[$key]=1
+      extract_bsp_pak "$bsp" && { new=$((new+1)); echo "[$(basename "$bsp")] extracted"; }
+    done
+    [ "$new" -gt 0 ] && { lowercase_tree; echo "  -> fixed $new map(s); reload in-game (console ~ -> retry)"; }
+    sleep 4
   done
 else
+  oneshot
   echo "Done. Reload the map in-game (console ~ -> retry)."
 fi
