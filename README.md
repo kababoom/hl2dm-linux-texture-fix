@@ -60,6 +60,10 @@ Then that map references content that **isn't packed in the BSP and isn't in the
 - Tested on **Half-Life 2: Deathmatch**. The same technique works for other Source 1 games (CS:S, etc.) — change `GAME_NAME` / `MOD` at the top of the script.
 - This is a **workaround for an engine limitation** (case-sensitive VPK/BSP lookups on Linux), not an official fix.
 
+## Related
+- **[linux-bhop](https://github.com/kababoom/linux-bhop)** — hold-to-bunnyhop (auto-jump) for Linux games (companion client tool).
+- **[hl2dm](https://github.com/kababoom/hl2dm)** — server-side SourceMod plugins for the [S-UK] HL2:DM servers.
+
 ## License
 
 [MIT](LICENSE)
