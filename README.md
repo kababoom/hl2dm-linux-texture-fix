@@ -40,13 +40,14 @@ Requires `unzip`, `dd`, `od` (standard on any distro). **No root needed.**
 
 ### Auto mode (`--watch`)
 
-`--watch` does an initial pass, then **re-scans the download folder every few seconds** and auto-fixes each new map shortly after it finishes downloading:
+Instead of running it by hand after each download, `--watch` does a one-shot pass and then **watches the download folder** and auto-fixes each new map the instant it finishes downloading:
 
 ```bash
+sudo apt install inotify-tools     # one-time (provides inotifywait)
 ./fix-hl2dm-textures.sh --watch
 ```
 
-Leave it running while you play; reload a map (`retry`) after it reports fixing one. (It polls rather than using inotify events, so it can't miss a download regardless of timing, and needs no extra packages. It only reads game files and writes loose copies — it never touches the running game.)
+Leave it running while you play; reload a map (`retry`) after it reports fixing one. It uses `inotify` (the Linux equivalent of Windows' `FileSystemWatcher`) and only ever copies files — it never touches the running game.
 
 ## Still purple after running it?
 
